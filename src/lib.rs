@@ -354,8 +354,8 @@ impl<T> Daemonize<T> {
         self
     }
 
-    /// Start daemonization process.
-    pub fn start(self) -> std::result::Result<T, DaemonizeError> {
+        /// Start daemonization in a new process (leaving the parent alive)
+    pub fn daemonize_child(self) -> std::result::Result<ForkResult<T>, DaemonizeError> {
         // Maps an Option<T> to Option<U> by applying a function Fn(T) -> Result<U, DaemonizeError>
         // to a contained value and try! it's result
         macro_rules! maptry {
@@ -370,15 +370,19 @@ impl<T> Daemonize<T> {
         unsafe {
             let pid_file_fd = maptry!(self.pid_file.clone(), create_pid_file);
 
-            try!(perform_fork());
+            if let ForkResult::Parent(pid) = try!(perform_fork()) {
+                return Ok(ForkResult::Parent(pid));
+            }
 
             try!(set_current_dir(self.directory).map_err(|_| DaemonizeError::ChangeDirectory));
             try!(set_sid());
             umask(self.umask);
 
-            try!(perform_fork());
+            if let ForkResult::Parent(_) = try!(perform_fork()) {
+                exit(0);
+            }
 
-            try!(redirect_standard_streams(self.stdin, self.stdout, self.stderr));
+            try!(redirect_standard_streams());
 
             let uid = maptry!(self.user, get_user);
             let gid = maptry!(self.group, get_group);
@@ -397,27 +401,39 @@ impl<T> Daemonize<T> {
 
             let privileged_action_result = (self.privileged_action)();
 
-            maptry!(self.root, change_root);
-
             maptry!(gid, set_group);
             maptry!(uid, set_user);
 
+            maptry!(self.root, change_root);
+
             maptry!(pid_file_fd, write_pid_file);
 
-            Ok(privileged_action_result)
+            Ok(ForkResult::Child(privileged_action_result))
+        }
+    }
+
+    /// Start daemonization process.
+    pub fn start(self) -> std::result::Result<T, DaemonizeError> {
+        match try!(self.daemonize_child()) {
+            ForkResult::Parent(_) => exit(0),
+            ForkResult::Child(t) => Ok(t),
         }
     }
 
 }
 
-unsafe fn perform_fork() -> Result<()> {
+#[derive(Clone, Debug)]
+pub enum ForkResult<T> { Parent(libc::pid_t), Child(T) }
+
+
+unsafe fn perform_fork() -> Result<ForkResult<()>> {
     let pid = fork();
     if pid < 0 {
         Err(DaemonizeError::Fork)
     } else if pid == 0 {
-        Ok(())
+        Ok(ForkResult::Child(()))
     } else {
-        exit(0)
+        Ok(ForkResult::Parent(pid))
     }
 }
 
