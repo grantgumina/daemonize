@@ -382,7 +382,7 @@ impl<T> Daemonize<T> {
                 exit(0);
             }
 
-            try!(redirect_standard_streams());
+            try!(redirect_standard_streams(self.stdin, self.stdout, self.stderr));
 
             let uid = maptry!(self.user, get_user);
             let gid = maptry!(self.group, get_group);
